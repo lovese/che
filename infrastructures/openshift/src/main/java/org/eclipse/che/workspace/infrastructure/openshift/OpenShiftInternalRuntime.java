@@ -37,6 +37,7 @@ import org.eclipse.che.api.workspace.server.URLRewriter;
 import org.eclipse.che.api.workspace.server.hc.ServerCheckerFactory;
 import org.eclipse.che.api.workspace.server.hc.ServersReadinessChecker;
 import org.eclipse.che.api.workspace.server.spi.InfrastructureException;
+import org.eclipse.che.api.workspace.server.spi.InternalInfrastructureException;
 import org.eclipse.che.api.workspace.server.spi.InternalRuntime;
 import org.eclipse.che.api.workspace.shared.dto.event.MachineStatusEvent;
 import org.eclipse.che.api.workspace.shared.dto.event.ServerStatusEvent;
@@ -113,25 +114,42 @@ public class OpenShiftInternalRuntime extends InternalRuntime<OpenShiftRuntimeCo
 
       //TODO Rework it to parallel waiting
       for (OpenShiftMachine machine : machines.values()) {
-        machine.waitRunning(machineStartTimeoutMin);
         final String machineName = machine.getName();
-        bootstrapperFactory
-            .create(
-                getContext().getIdentity(),
-                getContext().getEnvironment().getMachines().get(machineName).getInstallers(),
-                machine)
-            .bootstrap();
-
-        ServersReadinessChecker check =
-            new ServersReadinessChecker(machineName, machine.getServers(), serverCheckerFactory);
-        check.startAsync(new ServerReadinessHandler(machineName));
-        check.await();
-        sendRunningEvent(machine.getName());
+        try {
+          machine.waitRunning(machineStartTimeoutMin);
+          bootstrapperFactory
+              .create(
+                  getContext().getIdentity(),
+                  getContext().getEnvironment().getMachines().get(machineName).getInstallers(),
+                  machine)
+              .bootstrap();
+          final ServersReadinessChecker check =
+              new ServersReadinessChecker(machineName, machine.getServers(), serverCheckerFactory);
+          check.startAsync(new ServerReadinessHandler(machineName));
+          check.await();
+          sendRunningEvent(machine.getName());
+        } catch (InfrastructureException rethrow) {
+          sendFailedEvent(machineName, rethrow.getMessage());
+          throw rethrow;
+        }
       }
-    } catch (RuntimeException | InterruptedException e) {
-      LOG.error("Failed to start of OpenShift runtime. " + e.getMessage(), e);
-      project.cleanUp();
-      throw new InfrastructureException(e.getMessage(), e);
+    } catch (InfrastructureException | RuntimeException | InterruptedException e) {
+      LOG.error("Failed to start of OpenShift runtime. " + e.getMessage());
+      boolean interrupted = Thread.interrupted() || e instanceof InterruptedException;
+      try {
+        project.cleanUp();
+      } catch (InfrastructureException ignored) {
+      }
+      if (interrupted) {
+        throw new InfrastructureException("OpenShift environment start was interrupted");
+      }
+      try {
+        throw e;
+      } catch (InfrastructureException rethrow) {
+        throw rethrow;
+      } catch (Exception wrap) {
+        throw new InternalInfrastructureException(e.getMessage(), wrap);
+      }
     }
   }
 
@@ -208,5 +226,14 @@ public class OpenShiftInternalRuntime extends InternalRuntime<OpenShiftRuntimeCo
             .withIdentity(DtoConverter.asDto(getContext().getIdentity()))
             .withEventType(MachineStatus.RUNNING)
             .withMachineName(machineName));
+  }
+
+  private void sendFailedEvent(String machineName, String message) {
+    eventService.publish(
+        DtoFactory.newDto(MachineStatusEvent.class)
+            .withIdentity(DtoConverter.asDto(getContext().getIdentity()))
+            .withEventType(MachineStatus.FAILED)
+            .withMachineName(machineName)
+            .withError(message));
   }
 }

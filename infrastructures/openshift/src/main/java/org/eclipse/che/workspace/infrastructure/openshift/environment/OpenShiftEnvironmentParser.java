@@ -10,6 +10,7 @@
  */
 package org.eclipse.che.workspace.infrastructure.openshift.environment;
 
+import static java.lang.String.format;
 import static org.eclipse.che.workspace.infrastructure.openshift.Constants.CHE_POD_NAME_LABEL;
 
 import io.fabric8.kubernetes.api.model.Container;
@@ -18,6 +19,7 @@ import io.fabric8.kubernetes.api.model.KubernetesList;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.Pod;
+import io.fabric8.kubernetes.api.model.PodSpec;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.openshift.api.model.DeploymentConfig;
 import io.fabric8.openshift.api.model.Route;
@@ -27,6 +29,7 @@ import java.util.HashMap;
 import java.util.Map;
 import javax.inject.Inject;
 import org.eclipse.che.api.core.ValidationException;
+import org.eclipse.che.api.workspace.server.model.impl.WarningImpl;
 import org.eclipse.che.api.workspace.server.spi.InfrastructureException;
 import org.eclipse.che.api.workspace.server.spi.InternalEnvironment;
 import org.eclipse.che.api.workspace.server.spi.InternalEnvironment.InternalRecipe;
@@ -47,6 +50,7 @@ import org.eclipse.che.workspace.infrastructure.openshift.ServerExposer;
  * @author Sergii Leshchenko
  */
 public class OpenShiftEnvironmentParser {
+
   private final OpenShiftClientFactory clientFactory;
 
   @Inject
@@ -123,11 +127,12 @@ public class OpenShiftEnvironmentParser {
       OpenShiftEnvironment openShiftEnvironment, InternalEnvironment environment)
       throws ValidationException {
     for (Pod podConfig : openShiftEnvironment.getPods().values()) {
-      String podName = podConfig.getMetadata().getName();
+      final String podName = podConfig.getMetadata().getName();
       getLabels(podConfig).put(CHE_POD_NAME_LABEL, podName);
-
-      for (Container containerConfig : podConfig.getSpec().getContainers()) {
-        String machineName = podName + "/" + containerConfig.getName();
+      final PodSpec podSpec = podConfig.getSpec();
+      ignoreRestartPolicy(podSpec, podName, environment);
+      for (Container containerConfig : podSpec.getContainers()) {
+        String machineName = podName + '/' + containerConfig.getName();
         InternalMachineConfig machineConfig = environment.getMachines().get(machineName);
         if (machineConfig != null && !machineConfig.getServers().isEmpty()) {
           ServerExposer serverExposer =
@@ -151,6 +156,16 @@ public class OpenShiftEnvironmentParser {
       metadata.setLabels(labels);
     }
     return labels;
+  }
+
+  private void ignoreRestartPolicy(PodSpec podSpec, String podName, InternalEnvironment env) {
+    final String restartPolicy = podSpec.getRestartPolicy();
+    if (restartPolicy != null && !"Never".equalsIgnoreCase(restartPolicy)) {
+      final String warnMsg =
+          format("Restart policy '%s' for pod '%s' is ignored", restartPolicy, podName);
+      env.addWarning(new WarningImpl(101, warnMsg));
+    }
+    podSpec.setRestartPolicy("Never");
   }
 
   private void checkNotNull(Object object, String errorMessage) throws ValidationException {
